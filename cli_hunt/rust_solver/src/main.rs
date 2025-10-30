@@ -15,7 +15,7 @@ struct Args {
     #[arg(long)]
     challenge_id: String,
     #[arg(long)]
-    difficulty: String, // This is the number of leading zero bits required
+    difficulty: String, // This is a hexadecimal string representing the bitmask for the required zero prefix
     #[arg(long)]
     no_pre_mine: String,
     #[arg(long)]
@@ -30,7 +30,7 @@ pub fn hash_structure_good(hash: &[u8], difficulty_mask: u32) -> bool {
     }
 
     let hash_prefix = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]);
-    (hash_prefix & difficulty_mask) == 0
+    (hash_prefix & !difficulty_mask) == 0
 }
 
 pub fn init_rom(no_pre_mine_hex: &str) -> Rom {

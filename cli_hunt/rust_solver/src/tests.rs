@@ -1,8 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::{GB, MB, hash_structure_good, init_rom}; // Import hash_structure_good, init_rom and constants
-    use ashmaize::{Rom, RomGenerationType, hash};
-    use hex;
+    use crate::{hash_structure_good, init_rom}; // Import hash_structure_good, init_rom and constants
+    use ashmaize::hash;
 
     #[test]
     fn validate_example_solution() {
