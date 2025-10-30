@@ -97,7 +97,7 @@ def solve_challenges():
 
                 # Submit solution
                 submit_url = f"https://sm.midnight.gd/api/solution/{challenge['address']}/{challenge['challenge_id']}/{nonce}"
-                submit_response = requests.post(submit_url)
+                submit_response = requests.post(submit_url, data={})
                 submit_response.raise_for_status()
                 print(
                     f"Solution submitted successfully for {challenge['challenge_id']}"

@@ -2,6 +2,9 @@ use ashmaize::{Rom, RomGenerationType, hash};
 use clap::Parser;
 use hex;
 
+pub const MB: usize = 1024 * 1024;
+pub const GB: usize = 1024 * MB;
+
 mod tests;
 
 #[derive(Parser, Debug)]
@@ -21,7 +24,7 @@ struct Args {
     no_pre_mine_hour: String,
 }
 
-fn hash_structure_good(hash: &[u8], zero_bits: usize) -> bool {
+pub fn hash_structure_good(hash: &[u8], zero_bits: usize) -> bool {
     let full_bytes = zero_bits / 8; // Number of full zero bytes
     let remaining_bits = zero_bits % 8; // Bits to check in the next byte
 
@@ -42,22 +45,23 @@ fn hash_structure_good(hash: &[u8], zero_bits: usize) -> bool {
     }
 }
 
-fn main() {
-    const MB: usize = 1024 * 1024;
-    const GB: usize = 1024 * MB;
+pub fn init_rom(no_pre_mine_hex: &str) -> Rom {
+    let key = hex::decode(no_pre_mine_hex).unwrap();
+    Rom::new(
+        &key,
+        RomGenerationType::TwoStep {
+            pre_size: 16 * MB,
+            mixing_numbers: 4,
+        },
+        1 * GB,
+    )
+}
 
+fn main() {
     let args = Args::parse();
 
     // Initialize AshMaize ROM
-    let key = hex::decode(&args.no_pre_mine).unwrap();
-    let rom = Rom::new(
-        &key,
-        RomGenerationType::TwoStep {
-            pre_size: 16 * MB, // 16777216
-            mixing_numbers: 4,
-        },
-        1 * GB, // 1073741824
-    );
+    let rom = init_rom(&args.no_pre_mine);
 
     let mut nonce: u64 = 0; // Start with a random nonce or 0
 
