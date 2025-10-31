@@ -1,23 +1,40 @@
-import requests
-import json
-import subprocess
-import os
 import argparse
+import json
+import logging
+import os
+import subprocess
 import threading
-import signal
-import sys
-from datetime import datetime, timezone
 from copy import deepcopy
+from datetime import datetime, timezone
+
+import requests
+from tui import ChallengeUpdate, LogMessage, OrchestratorTUI, RefreshTable
 
 # --- Constants ---
 DB_FILE = "challenges.json"
 JOURNAL_FILE = "challenges.json.journal"
+LOG_FILE = "orchestrator.log"
 RUST_SOLVER_PATH = (
     "../rust_solver/target/release/ashmaize-solver"  # Assuming it's built
 )
 FETCH_INTERVAL = 15 * 60  # 15 minutes
 DEFAULT_SOLVE_INTERVAL = 30 * 60  # 30 minutes
-DEFAULT_SAVE_INTERVAL = 10 * 60  # 10 minutes
+DEFAULT_SAVE_INTERVAL = 2 * 60  # 2 minutes
+
+
+# --- Logging Setup ---
+def setup_logging():
+    """Sets up logging to a file."""
+    # Configure logging to write to a file, overwriting it each time
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        filename=LOG_FILE,
+        filemode="w",  # 'w' to overwrite the log on each run
+    )
+    # Silence noisy libraries
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
 # --- DatabaseManager for Thread-Safe Operations ---
@@ -26,6 +43,7 @@ class DatabaseManager:
 
     def __init__(self):
         self._db = {}
+        # A lock is still good practice for data consistency between background workers.
         self._lock = threading.Lock()
         self._load_from_disk()
         self._replay_journal()
@@ -35,16 +53,18 @@ class DatabaseManager:
             try:
                 with open(DB_FILE, "r") as f:
                     self._db = json.load(f)
-                print("Loaded main database from challenges.json.")
+                logging.info("Loaded main database from challenges.json.")
             except json.JSONDecodeError:
-                print(f"Error reading {DB_FILE}, starting with an empty database.")
+                logging.error(
+                    f"Error reading {DB_FILE}, starting with an empty database."
+                )
                 self._db = {}
 
     def _replay_journal(self):
         if not os.path.exists(JOURNAL_FILE):
             return
 
-        print("Replaying journal...")
+        logging.info("Replaying journal...")
         replayed_count = 0
         with open(JOURNAL_FILE, "r") as f:
             for line in f:
@@ -62,9 +82,9 @@ class DatabaseManager:
                         )
                     replayed_count += 1
                 except (json.JSONDecodeError, KeyError):
-                    print(f"Skipping malformed journal entry: {line.strip()}")
+                    logging.warning(f"Skipping malformed journal entry: {line.strip()}")
         if replayed_count > 0:
-            print(f"Replayed {replayed_count} journal entries.")
+            logging.info(f"Replayed {replayed_count} journal entries.")
 
     def _log_to_journal(self, action, payload):
         try:
@@ -76,7 +96,7 @@ class DatabaseManager:
                 }
                 f.write(json.dumps(log_entry) + "\n")
         except IOError as e:
-            print(f"CRITICAL: Could not write to journal file: {e}")
+            logging.critical(f"CRITICAL: Could not write to journal file: {e}")
 
     def _apply_add_challenge(self, address, challenge):
         if address in self._db:
@@ -95,10 +115,9 @@ class DatabaseManager:
 
     def add_challenge(self, address, challenge):
         with self._lock:
-            # Check if challenge already exists before logging to journal
             queue = self._db.get(address, {}).get("challenge_queue", [])
             if any(c["challengeId"] == challenge["challengeId"] for c in queue):
-                return False  # Indicate no change was made
+                return False
 
             self._log_to_journal(
                 "add_challenge", {"address": address, "challenge": challenge}
@@ -113,6 +132,8 @@ class DatabaseManager:
                 {"address": address, "challengeId": challenge_id, "update": update},
             )
             self._apply_update_challenge(address, challenge_id, update)
+            # Return the updated status if it exists
+            return update.get("status")
 
     def get_addresses(self):
         with self._lock:
@@ -123,26 +144,32 @@ class DatabaseManager:
             return deepcopy(self._db.get(address, {}).get("challenge_queue", []))
 
     def save_to_disk(self):
-        print("Saving database to disk...")
+        logging.info("Saving database to disk...")
         with self._lock:
             try:
                 with open(DB_FILE, "w") as f:
                     json.dump(self._db, f, indent=4)
-                # Clear the journal after a successful save
-                open(JOURNAL_FILE, "w").close()
-                print("Database saved successfully.")
+                if os.path.exists(JOURNAL_FILE):
+                    open(JOURNAL_FILE, "w").close()
+                logging.info("Database saved successfully.")
             except IOError as e:
-                print(f"Error saving database: {e}")
+                logging.error(f"Error saving database: {e}")
 
 
 # --- Worker Functions ---
-def fetcher_worker(db_manager, stop_event):
-    print("Fetcher thread started.")
+# Note: These are now designed to be run by a Textual @work decorator.
+# They accept a `tui_app` object to post messages back to the UI thread.
+
+
+def fetcher_worker(db_manager, stop_event, tui_app):
+    tui_app.post_message(LogMessage("Fetcher thread started."))
     while not stop_event.is_set():
-        print(f"[{datetime.now(timezone.utc).isoformat()}] Fetching new challenges...")
+        tui_app.post_message(LogMessage("Fetching new challenges..."))
         addresses = db_manager.get_addresses()
         if not addresses:
-            print("No addresses in database, fetcher is idle.")
+            tui_app.post_message(
+                LogMessage("No addresses in database, fetcher is idle.")
+            )
         else:
             try:
                 response = requests.get("https://sm.midnight.gd/api/challenge")
@@ -161,27 +188,37 @@ def fetcher_worker(db_manager, stop_event):
                     "availableAt": challenge_data["issued_at"],
                 }
 
+                added = False
                 for address in addresses:
                     if db_manager.add_challenge(address, new_challenge):
-                        print(
-                            f"New challenge {new_challenge['challengeId']} added for {address}."
+                        tui_app.post_message(
+                            LogMessage(
+                                f"New challenge {new_challenge['challengeId']} added for {address[:10]}..."
+                            )
                         )
+                        added = True
+
+                if added:
+                    # Signal to the UI that a full refresh is needed to show the new column
+                    tui_app.post_message(RefreshTable())
 
             except requests.exceptions.RequestException as e:
-                print(f"Error fetching challenge: {e}")
+                tui_app.post_message(LogMessage(f"Error fetching challenge: {e}"))
             except json.JSONDecodeError:
-                print("Error decoding challenge API response.")
+                tui_app.post_message(
+                    LogMessage("Error decoding challenge API response.")
+                )
 
         stop_event.wait(FETCH_INTERVAL)
-    print("Fetcher thread stopped.")
+    logging.info("Fetcher thread stopped.")
 
 
-def solver_worker(db_manager, stop_event, interval):
-    print(f"Solver thread started. Polling every {interval / 60} minutes.")
+def solver_worker(db_manager, stop_event, interval, tui_app):
+    tui_app.post_message(
+        LogMessage(f"Solver thread started. Polling every {interval / 60:.1f} minutes.")
+    )
     while not stop_event.is_set():
-        print(
-            f"[{datetime.now(timezone.utc).isoformat()}] Checking for challenges to solve..."
-        )
+        tui_app.post_message(LogMessage("Checking for challenges to solve..."))
         now = datetime.now(timezone.utc)
         addresses = db_manager.get_addresses()
 
@@ -193,17 +230,26 @@ def solver_worker(db_manager, stop_event, interval):
                         c["latestSubmission"].replace("Z", "+00:00")
                     )
                     if now > latest_submission:
-                        print(
-                            f"Challenge {c['challengeId']} for {address} has expired."
-                        )
-                        db_manager.update_challenge(
+                        msg = f"Challenge {c['challengeId']} for {address[:10]}... has expired."
+                        tui_app.post_message(LogMessage(msg))
+                        updated_status = db_manager.update_challenge(
                             address, c["challengeId"], {"status": "expired"}
                         )
+                        if updated_status:
+                            tui_app.post_message(
+                                ChallengeUpdate(
+                                    address, c["challengeId"], updated_status
+                                )
+                            )
                         continue
 
-                    print(
-                        f"Attempting to solve challenge {c['challengeId']} for {address}..."
+                    # Update UI to show we're trying to solve it
+                    tui_app.post_message(
+                        ChallengeUpdate(address, c["challengeId"], "solving")
                     )
+                    msg = f"Attempting to solve challenge {c['challengeId']} for {address[:10]}..."
+                    tui_app.post_message(LogMessage(msg))
+
                     try:
                         command = [
                             RUST_SOLVER_PATH,
@@ -225,18 +271,25 @@ def solver_worker(db_manager, stop_event, interval):
                         )
                         nonce = result.stdout.strip()
                         solved_time = datetime.now(timezone.utc)
-                        print(f"Found nonce: {nonce}")
+                        tui_app.post_message(
+                            LogMessage(f"Found nonce: {nonce} for {c['challengeId']}")
+                        )
 
                         submit_url = f"https://sm.midnight.gd/api/solution/{address}/{c['challengeId']}/{nonce}"
                         submit_response = requests.post(submit_url)
                         submit_response.raise_for_status()
                         validated_time = datetime.now(timezone.utc)
-                        print(f"Solution submitted successfully for {c['challengeId']}")
+                        tui_app.post_message(
+                            LogMessage(
+                                f"Solution submitted successfully for {c['challengeId']}"
+                            )
+                        )
 
                         try:
                             submission_data = submit_response.json()
                             crypto_receipt = submission_data.get("crypto_receipt")
 
+                            update = {}
                             if crypto_receipt:
                                 update = {
                                     "status": "validated",
@@ -252,68 +305,99 @@ def solver_worker(db_manager, stop_event, interval):
                                     "salt": nonce,
                                     "cryptoReceipt": crypto_receipt,
                                 }
-                                db_manager.update_challenge(
-                                    address, c["challengeId"], update
-                                )
-                                print(
-                                    f"Successfully validated challenge {c['challengeId']}"
+                                tui_app.post_message(
+                                    LogMessage(
+                                        f"Successfully validated challenge {c['challengeId']}"
+                                    )
                                 )
                             else:
-                                print(
-                                    f"Submission for {c['challengeId']} OK but no crypto_receipt in response."
-                                )
                                 update = {
-                                    "status": "solved",
+                                    "status": "solved",  # Submitted but not validated with receipt
                                     "solvedAt": solved_time.isoformat(
                                         timespec="milliseconds"
                                     ).replace("+00:00", "Z"),
                                     "salt": nonce,
                                 }
-                                db_manager.update_challenge(
-                                    address, c["challengeId"], update
+                                tui_app.post_message(
+                                    LogMessage(
+                                        f"Submission for {c['challengeId']} OK but no crypto_receipt."
+                                    )
+                                )
+
+                            updated_status = db_manager.update_challenge(
+                                address, c["challengeId"], update
+                            )
+                            if updated_status:
+                                tui_app.post_message(
+                                    ChallengeUpdate(
+                                        address, c["challengeId"], updated_status
+                                    )
                                 )
 
                         except json.JSONDecodeError:
-                            print(
-                                f"Failed to decode JSON from submission response for {c['challengeId']}."
-                            )
+                            msg = f"Failed to decode submission response for {c['challengeId']}."
+                            tui_app.post_message(LogMessage(msg))
                             update = {"status": "submission_error", "salt": nonce}
-                            db_manager.update_challenge(
+                            updated_status = db_manager.update_challenge(
                                 address, c["challengeId"], update
                             )
+                            if updated_status:
+                                tui_app.post_message(
+                                    ChallengeUpdate(
+                                        address, c["challengeId"], updated_status
+                                    )
+                                )
 
                     except subprocess.CalledProcessError as e:
-                        print(
-                            f"Rust solver error for {c['challengeId']}: {e.stderr.strip()}"
+                        msg = f"Rust solver error for {c['challengeId']}: {e.stderr.strip()}"
+                        tui_app.post_message(LogMessage(msg))
+                        # Revert status to available if solver fails
+                        tui_app.post_message(
+                            ChallengeUpdate(address, c["challengeId"], "available")
                         )
                     except requests.exceptions.RequestException as e:
-                        print(f"Error submitting solution for {c['challengeId']}: {e}")
+                        msg = f"Error submitting solution for {c['challengeId']}: {e}"
+                        tui_app.post_message(LogMessage(msg))
+                        tui_app.post_message(
+                            ChallengeUpdate(address, c["challengeId"], "available")
+                        )
                     except Exception as e:
-                        print(f"An unexpected error occurred during solving: {e}")
+                        msg = f"An unexpected error occurred during solving: {e}"
+                        tui_app.post_message(LogMessage(msg))
+                        tui_app.post_message(
+                            ChallengeUpdate(address, c["challengeId"], "available")
+                        )
 
         stop_event.wait(interval)
-    print("Solver thread stopped.")
+    logging.info("Solver thread stopped.")
 
 
-def saver_worker(db_manager, stop_event, interval):
-    print(f"Saver thread started. Saving to disk every {interval / 60} minutes.")
+def saver_worker(db_manager, stop_event, interval, tui_app):
+    tui_app.post_message(
+        LogMessage(
+            f"Saver thread started. Saving to disk every {interval / 60:.1f} minutes."
+        )
+    )
     while not stop_event.is_set():
-        db_manager.save_to_disk()
         stop_event.wait(interval)
-    print("Saver thread stopped.")
+        if stop_event.is_set():
+            break
+        tui_app.post_message(LogMessage("Performing periodic save..."))
+        db_manager.save_to_disk()
+    logging.info("Saver thread stopped.")
 
 
 # --- Main Application Logic ---
 def init_db(json_files):
     """Initializes or updates the main database file from JSON inputs."""
-    print("Initializing or updating database file...")
+    logging.info("Initializing or updating database file...")
     db = {}
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r") as f:
                 db = json.load(f)
         except json.JSONDecodeError:
-            print(f"Could not read existing {DB_FILE}, starting fresh.")
+            logging.warning(f"Could not read existing {DB_FILE}, starting fresh.")
 
     for file_path in json_files:
         try:
@@ -321,7 +405,7 @@ def init_db(json_files):
                 data = json.load(f)
                 address = data.get("registration_receipt", {}).get("walletAddress")
                 if not address:
-                    print(f"Could not find address in {file_path}, skipping.")
+                    logging.warning(f"Could not find address in {file_path}, skipping.")
                     continue
 
                 if address not in db:
@@ -329,9 +413,9 @@ def init_db(json_files):
                         "registration_receipt": data.get("registration_receipt"),
                         "challenge_queue": data.get("challenge_queue", []),
                     }
-                    print(f"Initialized new address: {address}")
+                    logging.info(f"Initialized new address: {address}")
                 else:
-                    print(f"Updating existing address: {address}")
+                    logging.info(f"Updating existing address: {address}")
                     existing_ids = {
                         c["challengeId"] for c in db[address].get("challenge_queue", [])
                     }
@@ -345,57 +429,44 @@ def init_db(json_files):
                         db[address]["challenge_queue"].sort(
                             key=lambda c: c["challengeId"]
                         )
-                        print(f"  Added {len(new_challenges)} new challenges.")
+                        logging.info(f"  Added {len(new_challenges)} new challenges.")
         except FileNotFoundError:
-            print(f"File not found: {file_path}")
+            logging.error(f"File not found: {file_path}")
         except json.JSONDecodeError:
-            print(f"Error decoding JSON from {file_path}")
+            logging.error(f"Error decoding JSON from {file_path}")
 
     with open(DB_FILE, "w") as f:
         json.dump(db, f, indent=4)
 
     if os.path.exists(JOURNAL_FILE):
         os.remove(JOURNAL_FILE)
-        print("Cleared existing journal file.")
-    print("Database file initialization complete.")
+        logging.info("Cleared existing journal file.")
+    logging.info("Database file initialization complete.")
 
 
 def run_orchestrator(args):
-    """Starts and manages all worker threads."""
-    print("Starting orchestrator...")
+    """Starts and manages the TUI and all worker threads."""
+    logging.info("Starting orchestrator TUI...")
     db_manager = DatabaseManager()
-    stop_event = threading.Event()
 
-    def signal_handler(sig, frame):
-        print("\nShutdown signal received. Stopping threads gracefully...")
-        stop_event.set()
+    worker_functions = {
+        "fetcher": fetcher_worker,
+        "solver": solver_worker,
+        "saver": saver_worker,
+    }
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    worker_args = {
+        "solve_interval": args.solve_interval,
+        "save_interval": args.save_interval,
+    }
 
-    threads = [
-        threading.Thread(target=fetcher_worker, args=(db_manager, stop_event)),
-        threading.Thread(
-            target=solver_worker, args=(db_manager, stop_event, args.solve_interval)
-        ),
-        threading.Thread(
-            target=saver_worker, args=(db_manager, stop_event, args.save_interval)
-        ),
-    ]
-
-    for t in threads:
-        t.start()
-
-    # Wait for the stop event to be set
-    stop_event.wait()
-
-    # Wait for all threads to terminate
-    for t in threads:
-        t.join()
-
-    print("All threads have stopped. Performing final save.")
-    db_manager.save_to_disk()
-    print("Orchestrator shut down.")
+    app = OrchestratorTUI(
+        db_manager=db_manager,
+        worker_functions=worker_functions,
+        worker_args=worker_args,
+    )
+    app.run()
+    logging.info("Orchestrator shut down.")
 
 
 def main():
@@ -409,30 +480,31 @@ def main():
     )
     init_parser.add_argument("files", nargs="+", help="List of JSON files to import.")
 
-    run_parser = subparsers.add_parser(
-        "run", help="Run the orchestrator with fetch, solve, and save threads."
-    )
+    run_parser = subparsers.add_parser("run", help="Run the orchestrator with TUI.")
     run_parser.add_argument(
         "--solve-interval",
         type=int,
         default=DEFAULT_SOLVE_INTERVAL,
-        help="Interval in seconds for the solver to check for challenges.",
+        help=f"Interval in seconds for the solver to check for challenges (default: {DEFAULT_SOLVE_INTERVAL}).",
     )
     run_parser.add_argument(
         "--save-interval",
         type=int,
         default=DEFAULT_SAVE_INTERVAL,
-        help="Interval in seconds for saving the database to disk.",
+        help=f"Interval in seconds for saving the database to disk (default: {DEFAULT_SAVE_INTERVAL}).",
     )
 
     args = parser.parse_args()
+
+    setup_logging()
 
     if args.command == "init":
         init_db(args.files)
     elif args.command == "run":
         if not os.path.exists(DB_FILE):
             print("Database file not found. Please run the 'init' command first.")
-            sys.exit(1)
+            logging.critical("Database file not found. Aborting run.")
+            os._exit(1)  # Exit immediately without traceback
         run_orchestrator(args)
 
 

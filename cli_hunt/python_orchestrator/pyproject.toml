@@ -3,4 +3,5 @@ name = "python-orchestrator"
 version = "0.1.0"
 dependencies = [
     "requests",
+    "textual>=6.4.0",
 ]
