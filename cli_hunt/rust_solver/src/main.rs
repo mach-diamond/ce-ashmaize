@@ -34,9 +34,8 @@ pub fn hash_structure_good(hash: &[u8], difficulty_mask: u32) -> bool {
 }
 
 pub fn init_rom(no_pre_mine_hex: &str) -> Rom {
-    let key = hex::decode(no_pre_mine_hex).unwrap();
     Rom::new(
-        &key,
+        no_pre_mine_hex.as_bytes(),
         RomGenerationType::TwoStep {
             pre_size: 16 * MB,
             mixing_numbers: 4,
