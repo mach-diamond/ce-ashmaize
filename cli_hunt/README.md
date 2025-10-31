@@ -100,3 +100,13 @@ All persistent data for your mining addresses and their challenges are stored in
 
 If you find things missing and want to contribute, simply create the code you need and push it on your own fork of this.
 I most likely wont integrate others code by lack of time to review this.
+
+## Disclaimer
+
+This tool is provided "as is," without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the software or the use or other dealings in the software.
+
+Users are solely responsible for their actions and for complying with all applicable laws and terms of service when using this tool. The developer of this tool is not responsible for any financial losses, account issues, or any other consequences that may arise from its use.
+
+## License
+
+For the full license text, please see the LICENSE file in the root of the repository.
