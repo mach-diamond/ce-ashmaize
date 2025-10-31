@@ -1,25 +1,14 @@
 import requests
 import json
 import subprocess
-import time
 import os
+import argparse
 from datetime import datetime, timezone
 
-CONFIG_FILE = "config.json"
 DB_FILE = "challenges.json"
 RUST_SOLVER_PATH = (
     "../rust_solver/target/release/ashmaize-solver"  # Assuming it's built
 )
-
-
-def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        print(
-            "Config file not found. Please create config.json with your Cardano addresses."
-        )
-        return {"addresses": []}
-    with open(CONFIG_FILE, "r") as f:
-        return json.load(f)
 
 
 def save_db(db):
@@ -30,13 +19,55 @@ def save_db(db):
 def load_db():
     if not os.path.exists(DB_FILE):
         return {}
-    with open(DB_FILE, "r") as f:
-        return json.load(f)
+    try:
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        print(
+            f"Warning: Could not decode JSON from {DB_FILE}. Starting with an empty DB."
+        )
+        return {}
 
 
-def fetch_challenges(addresses):
+def init_db(json_files):
+    """Initializes the database from a list of JSON files."""
+    print("Initializing database...")
+    db = {}
+    for file_path in json_files:
+        try:
+            with open(file_path, "r") as f:
+                data = json.load(f)
+                if (
+                    "registration_receipt" in data
+                    and "walletAddress" in data["registration_receipt"]
+                ):
+                    address = data["registration_receipt"]["walletAddress"]
+                    db[address] = {
+                        "registration_receipt": data["registration_receipt"],
+                        "challenge_queue": data.get("challenge_queue", []),
+                    }
+                    print(f"Added address {address} from {file_path}")
+                else:
+                    print(
+                        f"Warning: Could not find registration_receipt and walletAddress in {file_path}. Skipping."
+                    )
+        except FileNotFoundError:
+            print(f"Error: File not found: {file_path}")
+        except json.JSONDecodeError:
+            print(f"Error: Could not decode JSON from {file_path}")
+    save_db(db)
+    print("Database initialized.")
+
+
+def fetch_challenges():
     print("Fetching challenges...")
     db = load_db()
+    addresses = list(db.keys())
+
+    if not addresses:
+        print("No addresses found in the database. Run 'init' first.")
+        return
+
     for address in addresses:
         try:
             response = requests.get("https://sm.midnight.gd/api/challenge")
@@ -55,15 +86,19 @@ def fetch_challenges(addresses):
                 "availableAt": challenge_data["issued_at"],
             }
 
+            # This case should ideally not happen if init is run first
             if address not in db:
-                db[address] = []
+                db[address] = {"registration_receipt": {}, "challenge_queue": []}
+
+            challenge_queue = db[address]["challenge_queue"]
 
             # Check if challenge already exists for this address
             if not any(
-                c["challengeId"] == new_challenge["challengeId"] for c in db[address]
+                c["challengeId"] == new_challenge["challengeId"]
+                for c in challenge_queue
             ):
-                db[address].append(new_challenge)
-                db[address].sort(key=lambda c: c["challengeId"])
+                challenge_queue.append(new_challenge)
+                challenge_queue.sort(key=lambda c: c["challengeId"])
                 print(
                     f"New challenge fetched for {address}: {new_challenge['challengeId']}"
                 )
@@ -80,7 +115,8 @@ def solve_challenges():
     print("Solving challenges...")
     db = load_db()
     now = datetime.now(timezone.utc)
-    for address, challenges in db.items():
+    for address, data in db.items():
+        challenges = data.get("challenge_queue", [])
         for challenge in challenges:
             if challenge["status"] == "available":
                 latest_submission = datetime.fromisoformat(
@@ -149,29 +185,31 @@ def solve_challenges():
 
 
 def main():
-    config = load_config()
-    addresses = config.get("addresses", [])
+    parser = argparse.ArgumentParser(description="Midnight Scavenger Hunt Orchestrator")
+    subparsers = parser.add_subparsers(
+        dest="command", required=True, help="Sub-command help"
+    )
 
-    if not addresses:
-        print("No addresses found in config.json. Please add your Cardano addresses.")
-        return
+    # Init command
+    parser_init = subparsers.add_parser(
+        "init", help="Initialize the database from JSON files."
+    )
+    parser_init.add_argument("files", nargs="+", help="List of JSON files to import.")
 
-    # Simple CLI for now
-    while True:
-        print("\nChoose an action:")
-        print("1. Fetch challenges")
-        print("2. Solve challenges")
-        print("3. Exit")
-        choice = input("Enter your choice: ")
+    # Fetch command
+    subparsers.add_parser("fetch", help="Fetch new challenges for all addresses.")
 
-        if choice == "1":
-            fetch_challenges(addresses)
-        elif choice == "2":
-            solve_challenges()
-        elif choice == "3":
-            break
-        else:
-            print("Invalid choice. Please try again.")
+    # Solve command
+    subparsers.add_parser("solve", help="Attempt to solve available challenges.")
+
+    args = parser.parse_args()
+
+    if args.command == "init":
+        init_db(args.files)
+    elif args.command == "fetch":
+        fetch_challenges()
+    elif args.command == "solve":
+        solve_challenges()
 
 
 if __name__ == "__main__":
