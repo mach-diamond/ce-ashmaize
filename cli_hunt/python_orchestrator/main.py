@@ -202,7 +202,7 @@ def fetcher_worker(db_manager, stop_event, tui_app):
                     # Signal to the UI that a full refresh is needed to show the new column
                     tui_app.post_message(RefreshTable())
 
-            except requests.exceptions.RequestException as e:
+            except requests.exceptions.RequestException as e:  # ty: ignore
                 tui_app.post_message(LogMessage(f"Error fetching challenge: {e}"))
             except json.JSONDecodeError:
                 tui_app.post_message(
@@ -355,7 +355,7 @@ def solver_worker(db_manager, stop_event, interval, tui_app):
                         tui_app.post_message(
                             ChallengeUpdate(address, c["challengeId"], "available")
                         )
-                    except requests.exceptions.RequestException as e:
+                    except requests.exceptions.RequestException as e:  # ty: ignore
                         msg = f"Error submitting solution for {c['challengeId']}: {e}"
                         tui_app.post_message(LogMessage(msg))
                         tui_app.post_message(
