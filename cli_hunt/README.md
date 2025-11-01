@@ -1,7 +1,6 @@
 # Midnight Scavenger CLI Miner
 
-This project provides a command-line interface (CLI) tool for managing and automating the Midnight Scavenger mining process, offering an alternative to the official web application.
-
+This project provides a command-line interface (CLI) alternative to the web app for the Midnight Scavenger mining process.
 Wallet creation and scavenger hunt registration are NOT handled and still require you to use the web interface, for obvious non-gaming reasons.
 This tool only streamlines the continuous process of requesting, solving, and submitting new challenges, in an alternative way to the browser.
 The tool can manage multiple mining addresses and keep track of their challenge progress locally.
