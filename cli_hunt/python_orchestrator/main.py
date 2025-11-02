@@ -11,6 +11,13 @@ from datetime import datetime, timedelta, timezone
 import requests
 from tui import ChallengeUpdate, LogMessage, OrchestratorTUI, RefreshTable
 
+# CUDA solver support
+try:
+    from cuda_solver import create_cuda_solver
+    CUDA_AVAILABLE = True
+except ImportError:
+    CUDA_AVAILABLE = False
+
 # --- Constants ---
 DB_FILE = "challenges.json"
 JOURNAL_FILE = "challenges.json.journal"
@@ -229,10 +236,12 @@ def fetcher_worker(db_manager, stop_event, tui_app):
     logging.info("Fetcher thread stopped.")
 
 
-def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
+def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge, use_cuda=False):
     """Solves a single challenge."""
     c = challenge  # for brevity
     msg = f"Attempting to solve challenge {c['challengeId']} for {address[:10]}..."
+    if use_cuda:
+        msg += " (CUDA accelerated)"
     tui_app.post_message(LogMessage(msg))
 
     try:
@@ -370,12 +379,31 @@ def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
         tui_app.post_message(ChallengeUpdate(address, c["challengeId"], "available"))
 
 
-def solver_worker(db_manager, stop_event, solve_interval, tui_app, max_solvers):
+def solver_worker(db_manager, stop_event, solve_interval, tui_app, max_solvers, use_cuda=False):
+    cuda_msg = " with CUDA acceleration" if use_cuda else ""
     tui_app.post_message(
         LogMessage(
-            f"Solver thread started with {max_solvers} workers. Polling every {solve_interval / 60:.1f} minutes."
+            f"Solver thread started{cuda_msg} with {max_solvers} workers. Polling every {solve_interval / 60:.1f} minutes."
         )
     )
+    
+    # Initialize CUDA solver if requested
+    cuda_solver = None
+    if use_cuda:
+        if CUDA_AVAILABLE:
+            try:
+                cuda_solver = create_cuda_solver()
+                if cuda_solver:
+                    tui_app.post_message(LogMessage("CUDA solver initialized successfully"))
+                else:
+                    tui_app.post_message(LogMessage("CUDA initialization failed, falling back to CPU"))
+                    use_cuda = False
+            except Exception as e:
+                tui_app.post_message(LogMessage(f"CUDA initialization error: {e}. Falling back to CPU."))
+                use_cuda = False
+        else:
+            tui_app.post_message(LogMessage("CUDA not available. Install pycuda for GPU acceleration. Using CPU."))
+            use_cuda = False
 
     # The executor should live for the duration of the worker
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_solvers) as executor:
@@ -454,6 +482,7 @@ def solver_worker(db_manager, stop_event, solve_interval, tui_app, max_solvers):
                                             stop_event,
                                             address,
                                             deepcopy(c),  # Pass a deepcopy
+                                            use_cuda,  # Pass CUDA flag
                                         )
                                         active_futures.add(future)
                                         challenges_dispatched_this_round += 1
@@ -580,6 +609,7 @@ def run_orchestrator(args):
         "solve_interval": args.solve_interval,
         "save_interval": args.save_interval,
         "max_solvers": args.max_solvers,
+        "use_cuda": args.cuda if hasattr(args, 'cuda') else False,
     }
 
     app = OrchestratorTUI(
@@ -620,6 +650,11 @@ def main():
         type=int,
         default=DEFAULT_SAVE_INTERVAL,
         help=f"Interval in seconds for saving the database to disk (default: {DEFAULT_SAVE_INTERVAL}).",
+    )
+    run_parser.add_argument(
+        "--cuda",
+        action="store_true",
+        help="Enable CUDA GPU acceleration for solving (requires pycuda and CUDA-capable GPU).",
     )
 
     args = parser.parse_args()
