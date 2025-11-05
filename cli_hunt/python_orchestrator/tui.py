@@ -89,6 +89,7 @@ class OrchestratorTUI(App):
             "validated": "🏆 Validated",
             "expired": "❌ Expired",
             "submission_error": "❗️ Error",
+            "unsubmitted": "⚠️ Unsub",
         }
         return status_map.get(status, status)
 
@@ -188,7 +189,8 @@ class OrchestratorTUI(App):
     def run_fetcher_worker(self) -> None:
         """Runs the fetcher logic in a background thread."""
         fetcher_func = self.worker_functions["fetcher"]
-        fetcher_func(self.db_manager, self.stop_event, self)
+        fetch_interval_minutes = self.worker_args.get("fetch_interval_minutes")
+        fetcher_func(self.db_manager, self.stop_event, self, fetch_interval_minutes)
 
     @work(name="solver", group="workers", thread=True)
     def run_solver_worker(self) -> None:
@@ -196,7 +198,13 @@ class OrchestratorTUI(App):
         solver_func = self.worker_functions["solver"]
         solve_interval = self.worker_args["solve_interval"]
         max_solvers = self.worker_args["max_solvers"]
-        solver_func(self.db_manager, self.stop_event, solve_interval, self, max_solvers)
+        solver_func(
+            self.db_manager,
+            self.stop_event,
+            solve_interval,
+            self,
+            max_solvers,
+        )
 
     @work(name="saver", group="workers", thread=True)
     def run_saver_worker(self) -> None:
