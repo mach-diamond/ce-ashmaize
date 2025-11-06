@@ -7,7 +7,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.message import Message
-from textual.widgets import DataTable, Footer, Header, Log
+from textual.widgets import DataTable, Footer, Header, Log, Static
 
 # --- Custom Messages for thread-safe UI updates ---
 
@@ -36,6 +36,12 @@ class RefreshTable(Message):
     pass
 
 
+class UpdateSummary(Message):
+    """Message to signal a summary update without full table refresh."""
+
+    pass
+
+
 # --- The Main TUI Application ---
 
 
@@ -43,8 +49,17 @@ class OrchestratorTUI(App):
     """A Textual TUI for the Midnight Scavenger Hunt orchestrator."""
 
     TITLE = "Midnight Scavenger Hunt Orchestrator"
-    # CSS can be added for styling. For now, we use defaults.
-    # CSS_PATH = "tui.css"
+    
+    CSS = """
+    #summary {
+        background: $boost;
+        color: $text;
+        height: auto;
+        padding: 1;
+        text-align: center;
+        text-style: bold;
+    }
+    """
 
     def __init__(
         self, db_manager, worker_functions: dict, worker_args: dict, *args, **kwargs
@@ -62,6 +77,7 @@ class OrchestratorTUI(App):
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
         yield Header()
+        yield Static(id="summary", expand=False)
         with VerticalScroll():
             yield DataTable(id="challenges_table", cursor_type="row")
         yield Log(id="logs", auto_scroll=True, max_lines=1000)
@@ -71,8 +87,10 @@ class OrchestratorTUI(App):
         """Called when the app is mounted."""
         self.log_widget = self.query_one(Log)
         self.table = self.query_one(DataTable)
+        self.summary_widget = self.query_one("#summary", Static)
 
         self.log_widget.write_line("TUI mounted. Initializing table...")
+        self.update_summary()
         self.refresh_table_structure()
 
         self.log_widget.write_line("Starting background worker threads...")
@@ -169,7 +187,73 @@ class OrchestratorTUI(App):
     def on_refresh_table(self, message: RefreshTable) -> None:
         """Handle request to perform a full table refresh."""
         self.log_widget.write_line("Refreshing table data...")
+        self.update_summary()
         self.refresh_table_structure()
+
+    def on_update_summary(self, message: UpdateSummary) -> None:
+        """Handle request to update just the summary."""
+        self.update_summary()
+
+    def update_summary(self) -> None:
+        """Update the summary widget with mining statistics."""
+        import requests
+        
+        # Fetch work_to_star_rate from API
+        work_to_star_rates = [3724076, 2133655, 2396362, 3521664, 2233377]  # Fallback values
+        try:
+            response = requests.get("https://scavenger.prod.gd.midnighttge.io/work_to_star_rate", timeout=5)
+            response.raise_for_status()
+            api_rates = response.json()
+            if isinstance(api_rates, list) and len(api_rates) > 0:
+                work_to_star_rates = api_rates
+        except Exception:
+            pass  # Silently use fallback
+        
+        addresses = self.db_manager.get_addresses()
+        if not addresses:
+            self.summary_widget.update("No addresses found.")
+            return
+        
+        # Calculate average rate for current day estimation (exclude first day)
+        avg_rate = sum(work_to_star_rates[1:]) / len(work_to_star_rates[1:]) if len(work_to_star_rates) > 1 else work_to_star_rates[0]
+        current_day = len(work_to_star_rates) + 1  # Next day after known rates
+        
+        grand_total_star = 0
+        current_day_star = 0
+        total_validated = 0
+        current_day_validated = 0
+        
+        for address in addresses:
+            challenges = self.db_manager.get_challenge_queue(address)
+            
+            for c in challenges:
+                if c.get("status") == "validated":
+                    campaign_day = c.get("campaignDay")
+                    if campaign_day is not None:
+                        total_validated += 1
+                        # Day is 1-indexed, list is 0-indexed
+                        if campaign_day - 1 < len(work_to_star_rates):
+                            star_per_solution = work_to_star_rates[campaign_day - 1]
+                            grand_total_star += star_per_solution
+                        # Current day estimation
+                        if campaign_day == current_day:
+                            current_day_validated += 1
+                            current_day_star += avg_rate
+        
+        grand_total_night = grand_total_star / 1_000_000
+        current_day_night = current_day_star / 1_000_000
+        estimated_total_night = grand_total_night + current_day_night
+        
+        summary_text = (
+            f"Mining Summary: {len(addresses)} address(es) | "
+            f"{total_validated} solutions | "
+            f"Earned: {grand_total_night:.3f} $NIGHT"
+        )
+        
+        if current_day_validated > 0:
+            summary_text += f" | Day {current_day} Est: ~{current_day_night:.3f} $NIGHT ({current_day_validated} sol) | Total Est: {estimated_total_night:.3f} $NIGHT"
+        
+        self.summary_widget.update(summary_text)
 
     # --- Actions ---
 
