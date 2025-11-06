@@ -9,7 +9,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
 import requests
-from tui import ChallengeUpdate, LogMessage, OrchestratorTUI, RefreshTable
+from tui import ChallengeUpdate, LogMessage, OrchestratorTUI, RefreshTable, UpdateSummary
 
 # --- Constants ---
 DB_FILE = "challenges.json"
@@ -281,7 +281,8 @@ def fetcher_worker(db_manager, stop_event, tui_app, fetch_interval_minutes=None)
             }
             response = requests.get("https://scavenger.prod.gd.midnighttge.io/challenge", headers=headers)
             response.raise_for_status()
-            challenge_data = response.json()["challenge"]
+            full_response = response.json()
+            challenge_data = full_response["challenge"]
 
             new_challenge = {
                 "challengeId": challenge_data["challenge_id"],
@@ -306,6 +307,19 @@ def fetcher_worker(db_manager, stop_event, tui_app, fetch_interval_minutes=None)
                     added = True
 
             if added:
+                # Archive the fetched challenge
+                try:
+                    archive_filename = f"{new_challenge['challengeId']}.json"
+                    archive_path = os.path.join(MANUAL_CHALLENGES_DIR, archive_filename)
+                    
+                    # Only archive if not already exists
+                    if not os.path.exists(archive_path) and not os.path.exists(archive_path + ".processed"):
+                        with open(archive_path, 'w') as f:
+                            json.dump(full_response, f, indent=2)
+                        tui_app.post_message(LogMessage(f"Archived challenge to {archive_filename}"))
+                except IOError as e:
+                    tui_app.post_message(LogMessage(f"Warning: Could not archive challenge: {e}"))
+                
                 # Signal to the UI that a full refresh is needed to show the new column
                 tui_app.post_message(RefreshTable())
             return True
@@ -533,6 +547,9 @@ def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
                     tui_app.post_message(
                         ChallengeUpdate(address, c["challengeId"], updated_status)
                     )
+                    # Update summary if validated
+                    if updated_status == "validated":
+                        tui_app.post_message(UpdateSummary())
 
             except json.JSONDecodeError:
                 msg = f"Failed to decode submission response for {c['challengeId']}."
