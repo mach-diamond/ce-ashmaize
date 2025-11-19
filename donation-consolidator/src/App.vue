@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, computed } from 'vue'
+import { onMounted, computed, ref } from 'vue'
 import { useWalletStore } from './stores/walletStore'
 import { useChallenges } from './composables/useChallenges'
 import { 
@@ -14,6 +14,20 @@ const walletStore = useWalletStore()
 const { loadChallenges } = useChallenges()
 
 const availableWallets = computed(() => detectAvailableWallets())
+
+// Track curl commands for each address
+const curlCommands = ref<Record<string, string>>({})
+
+// Sort registered addresses - matched ones first
+const sortedRegisteredAddresses = computed(() => {
+  const matched = walletStore.registeredAddresses.filter(addr => 
+    walletStore.connectedAddresses.includes(addr.address)
+  )
+  const unmatched = walletStore.registeredAddresses.filter(addr => 
+    !walletStore.connectedAddresses.includes(addr.address)
+  )
+  return [...matched, ...unmatched]
+})
 
 // Load challenges on mount
 onMounted(async () => {
@@ -86,10 +100,18 @@ async function handleDonate(originalAddress: string) {
       walletApi
     )
     
-    console.log('Donation successful:', result)
+    console.log('Donation result:', result)
     
-    // Mark as completed
-    walletStore.markDonationSent(originalAddress, result.donation_id, result.timestamp)
+    // Store the curl command for this address
+    curlCommands.value[originalAddress] = result.curlCommand
+    
+    if (result.success && result.response) {
+      // Mark as completed
+      walletStore.markDonationSent(originalAddress, result.response)
+    } else {
+      // Show error with curl command in UI
+      walletStore.setError(result.error || 'Donation failed - see curl command below')
+    }
     
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to submit donation'
@@ -99,6 +121,80 @@ async function handleDonate(originalAddress: string) {
   } finally {
     walletStore.isLoading = false
   }
+}
+
+// Copy curl command to clipboard
+function copyCurlCommand(address: string) {
+  const cmd = curlCommands.value[address]
+  if (cmd && navigator.clipboard) {
+    navigator.clipboard.writeText(cmd)
+    alert('Curl command copied to clipboard!')
+  }
+}
+
+// Manual mark as consolidated
+function markAsConsolidated(address: string) {
+  const confirmed = confirm(`Mark ${address.slice(0, 20)}... as consolidated?`)
+  if (confirmed) {
+    walletStore.markDonationSent(address, {
+      status: 'success',
+      message: 'Manually marked as consolidated',
+      donation_id: 'manual-' + Date.now(),
+      original_address: address,
+      destination_address: walletStore.donationAddress || '',
+      timestamp: new Date().toISOString(),
+      solutions_consolidated: 0
+    })
+    // Clear the curl command
+    delete curlCommands.value[address]
+  }
+}
+
+// Export progress
+function handleExportProgress() {
+  const json = walletStore.exportProgress()
+  const blob = new Blob([json], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `midnight-consolidation-${Date.now()}.json`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+// Import progress
+const fileInput = ref<HTMLInputElement | null>(null)
+
+function handleImportClick() {
+  fileInput.value?.click()
+}
+
+function handleImportFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    try {
+      const jsonData = e.target?.result as string
+      const result = walletStore.importProgress(jsonData)
+      
+      if (result.success) {
+        alert(`✓ ${result.message}`)
+      } else {
+        alert(`✗ ${result.message}`)
+      }
+    } catch (err) {
+      alert('Failed to read file')
+    }
+  }
+  reader.readAsText(file)
+  
+  // Reset the input so the same file can be selected again
+  input.value = ''
 }
 
 // Format NIGHT with commas
@@ -239,13 +335,37 @@ function formatNight(value: number): string {
       <section class="card">
         <div class="table-header">
           <h2>Registered Addresses</h2>
-          <button 
-            v-if="walletStore.completedAddresses.length > 0"
-            @click="walletStore.clearProgress()" 
-            class="btn btn-secondary btn-sm"
-          >
-            Clear Progress
-          </button>
+          <div class="header-actions">
+            <button 
+              @click="handleExportProgress"
+              class="btn btn-secondary btn-sm"
+              :disabled="walletStore.completedAddresses.length === 0"
+              title="Export consolidation progress to file"
+            >
+              📥 Export
+            </button>
+            <button 
+              @click="handleImportClick"
+              class="btn btn-secondary btn-sm"
+              title="Import consolidation progress from file"
+            >
+              📤 Import
+            </button>
+            <input 
+              ref="fileInput"
+              type="file" 
+              accept=".json"
+              @change="handleImportFile"
+              style="display: none"
+            />
+            <button 
+              v-if="walletStore.completedAddresses.length > 0"
+              @click="walletStore.clearProgress()" 
+              class="btn btn-secondary btn-sm"
+            >
+              Clear Progress
+            </button>
+          </div>
         </div>
         
         <div class="table-container">
@@ -261,11 +381,12 @@ function formatNight(value: number): string {
             </thead>
             <tbody>
               <tr 
-                v-for="addr in walletStore.registeredAddresses" 
+                v-for="addr in sortedRegisteredAddresses" 
                 :key="addr.address"
                 :class="{ 
                   'is-completed': addr.donationSent,
-                  'is-matched': walletStore.connectedAddresses.includes(addr.address)
+                  'is-matched': walletStore.connectedAddresses.includes(addr.address),
+                  'is-consolidator': addr.isConsolidator
                 }"
               >
                 <td>
@@ -286,7 +407,10 @@ function formatNight(value: number): string {
                   <span class="night-amount">{{ formatNight(addr.nightAllocation) }}</span>
                 </td>
                 <td class="center">
-                  <span v-if="addr.donationSent" class="status-badge status-done">
+                  <span v-if="addr.isConsolidator" class="status-badge status-consolidator">
+                    🔵 Consolidator
+                  </span>
+                  <span v-else-if="addr.donationSent" class="status-badge status-done">
                     ✓ Done
                   </span>
                   <span v-else-if="addr.error" class="status-badge status-error">
@@ -297,25 +421,93 @@ function formatNight(value: number): string {
                   </span>
                 </td>
                 <td class="center">
-                  <button 
-                    v-if="!addr.donationSent && addr.validatedChallenges > 0"
-                    @click="handleDonate(addr.address)"
-                    class="btn btn-success btn-sm"
-                    :disabled="!walletStore.donationAddress || !walletStore.isConnected || walletStore.isLoading"
-                  >
-                    <span v-if="walletStore.isLoading">...</span>
-                    <span v-else>Send Donation</span>
-                  </button>
-                  <div v-else-if="addr.donationSent" class="completed-info">
-                    <div class="completed-time">
-                      {{ addr.timestamp ? new Date(addr.timestamp).toLocaleString() : '' }}
+                  <!-- Consolidator Address - Show toggle button -->
+                  <div v-if="addr.isConsolidator" class="consolidator-actions">
+                    <div class="consolidator-info">
+                      This is a consolidator address
                     </div>
-                    <div class="donation-id" v-if="addr.donationId">
-                      ID: {{ addr.donationId.slice(0, 8) }}...
+                    <button 
+                      @click="walletStore.toggleConsolidatorAddress(addr.address)"
+                      class="btn btn-secondary btn-sm"
+                      title="Remove consolidator status"
+                    >
+                      Remove Consolidator Status
+                    </button>
+                  </div>
+                  
+                  <!-- Only show action for connected wallet addresses that aren't consolidators -->
+                  <div v-else-if="walletStore.connectedAddresses.includes(addr.address) && !addr.donationSent && addr.validatedChallenges > 0" class="donation-action">
+                    <div class="allocation-info">
+                      <div class="from-allocation">
+                        <span class="label">From:</span>
+                        <span class="value">{{ formatNight(addr.nightAllocation) }} $NIGHT</span>
+                      </div>
+                      <div class="arrow">→</div>
+                      <div class="to-allocation">
+                        <span class="label">To:</span>
+                        <span class="value">{{ walletStore.donationAddress ? shortenAddress(walletStore.donationAddress, 8) : '(set address)' }}</span>
+                      </div>
+                    </div>
+                    
+                    <div style="display: flex; gap: 0.5rem; width: 100%;">
+                      <button 
+                        @click="handleDonate(addr.address)"
+                        class="btn btn-success btn-sm"
+                        style="flex: 1"
+                        :disabled="!walletStore.donationAddress || !walletStore.isConnected || walletStore.isLoading"
+                      >
+                        <span v-if="walletStore.isLoading">...</span>
+                        <span v-else>Generate Curl</span>
+                      </button>
+                      
+                      <button 
+                        @click="markAsConsolidated(addr.address)"
+                        class="btn btn-secondary btn-sm"
+                        style="flex: 1"
+                        title="Mark as consolidated after running curl manually"
+                      >
+                        ✓ Mark Done
+                      </button>
+                    </div>
+                    
+                    <!-- Button to mark as consolidator if it has donations sent to it -->
+                    <button 
+                      v-if="addr.validatedChallenges > 0"
+                      @click="walletStore.toggleConsolidatorAddress(addr.address)"
+                      class="btn btn-info btn-sm"
+                      style="width: 100%; margin-top: 0.5rem;"
+                      title="Mark this as a consolidator address (won't consolidate further)"
+                    >
+                      🔵 Mark as Consolidator
+                    </button>
+                    
+                    <!-- Show curl command if available -->
+                    <div v-if="curlCommands[addr.address]" class="curl-command-box">
+                      <div class="curl-header">
+                        <span>⚠️ Run this command in your terminal:</span>
+                        <button @click="copyCurlCommand(addr.address)" class="btn-copy">📋 Copy</button>
+                      </div>
+                      <code class="curl-code">{{ curlCommands[addr.address] }}</code>
                     </div>
                   </div>
-                  <div v-else-if="addr.error" class="error-message">
-                    {{ addr.error }}
+                  <div v-else-if="addr.donationSent" class="completed-info">
+                    <div class="completed-badge">✓ Consolidated</div>
+                    <div class="completed-time">
+                      {{ addr.donationResponse?.timestamp ? new Date(addr.donationResponse.timestamp).toLocaleString() : '' }}
+                    </div>
+                    <div class="donation-id" v-if="addr.donationResponse?.donation_id">
+                      ID: {{ addr.donationResponse.donation_id.slice(0, 8) }}...
+                    </div>
+                  </div>
+                  <div v-else-if="addr.error" class="error-info">
+                    <div class="error-badge">✗ Error</div>
+                    <div class="error-message">{{ addr.error }}</div>
+                  </div>
+                  <div v-else-if="!walletStore.connectedAddresses.includes(addr.address)" class="not-in-wallet">
+                    Not in connected wallet
+                  </div>
+                  <div v-else class="no-challenges">
+                    No challenges
                   </div>
                 </td>
               </tr>
@@ -595,6 +787,12 @@ header p {
   margin-bottom: 1rem;
 }
 
+.header-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
 .table-container {
   overflow-x: auto;
 }
@@ -624,6 +822,11 @@ header p {
 
 .addresses-table tr.is-matched {
   background: rgba(102, 126, 234, 0.05);
+}
+
+.addresses-table tr.is-consolidator {
+  background: rgba(59, 130, 246, 0.08);
+  border-left: 3px solid #3b82f6;
 }
 
 .address-cell {
@@ -670,6 +873,11 @@ header p {
   font-weight: 500;
 }
 
+.status-consolidator {
+  background: rgba(59, 130, 246, 0.2);
+  color: #3b82f6;
+}
+
 .status-done {
   background: rgba(34, 197, 94, 0.2);
   color: #22c55e;
@@ -689,10 +897,17 @@ header p {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
+  align-items: center;
+}
+
+.completed-badge {
+  color: #22c55e;
+  font-weight: 500;
+  font-size: 0.85rem;
 }
 
 .completed-time {
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   color: #a0a0a0;
 }
 
@@ -702,10 +917,95 @@ header p {
   font-family: 'Courier New', monospace;
 }
 
-.error-message {
-  font-size: 0.75rem;
+.error-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.error-badge {
   color: #ef4444;
-  max-width: 200px;
+  font-weight: 500;
+  font-size: 0.85rem;
+}
+
+.error-message {
+  font-size: 0.7rem;
+  color: #ef4444;
+  max-width: 250px;
+  text-align: center;
+}
+
+.no-challenges {
+  color: #a0a0a0;
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+.not-in-wallet {
+  color: #a0a0a0;
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+.consolidator-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.5rem;
+}
+
+.consolidator-info {
+  color: #3b82f6;
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-align: center;
+}
+
+.donation-action {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.5rem;
+}
+
+.allocation-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.from-allocation,
+.to-allocation {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.allocation-info .label {
+  color: #a0a0a0;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+}
+
+.allocation-info .value {
+  color: #e4e4e4;
+  font-weight: 500;
+  font-family: 'Courier New', monospace;
+  font-size: 0.8rem;
+}
+
+.arrow {
+  color: #667eea;
+  font-size: 1.2rem;
+  font-weight: bold;
 }
 
 .btn {
@@ -758,6 +1058,16 @@ header p {
   background: rgba(34, 197, 94, 0.3);
 }
 
+.btn-info {
+  background: rgba(59, 130, 246, 0.2);
+  color: #3b82f6;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.btn-info:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.3);
+}
+
 .btn-icon {
   background: none;
   border: none;
@@ -769,5 +1079,53 @@ header p {
 
 .btn-icon:hover {
   opacity: 1;
+}
+
+.curl-command-box {
+  width: 100%;
+  margin-top: 1rem;
+  padding: 1rem;
+  background: rgba(251, 191, 36, 0.1);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 6px;
+}
+
+.curl-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+  color: #fbbf24;
+}
+
+.btn-copy {
+  background: rgba(251, 191, 36, 0.2);
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  color: #fbbf24;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.btn-copy:hover {
+  background: rgba(251, 191, 36, 0.3);
+}
+
+.curl-code {
+  display: block;
+  width: 100%;
+  max-width: 600px;
+  padding: 0.75rem;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.7rem;
+  color: #e4e4e4;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 </style>

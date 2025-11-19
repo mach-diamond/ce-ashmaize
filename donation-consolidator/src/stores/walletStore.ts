@@ -18,6 +18,7 @@ export interface RegisteredAddress {
   starAllocation: number
   nightAllocation: number
   donationSent: boolean
+  isConsolidator: boolean  // New flag for consolidator addresses
   donationResponse?: DonationResponse
   error?: string
 }
@@ -25,6 +26,7 @@ export interface RegisteredAddress {
 const STORAGE_KEY = 'midnight-donation-tracker'
 const DONATION_ADDRESS_KEY = 'midnight-donation-address'
 const WORK_TO_STAR_RATE_KEY = 'midnight-work-to-star-rate'
+const CONSOLIDATOR_ADDRESSES_KEY = 'midnight-consolidator-addresses'
 
 export const useWalletStore = defineStore('wallet', () => {
   // State
@@ -32,6 +34,7 @@ export const useWalletStore = defineStore('wallet', () => {
   const connectedAddresses = ref<string[]>([])
   const registeredAddresses = ref<RegisteredAddress[]>([])
   const donationAddress = ref<string>('')
+  const consolidatorAddresses = ref<string[]>([])
   const workToStarRate = ref<number[]>([])
   const isLoading = ref(false)
   const isFetchingStatistics = ref(false)
@@ -131,7 +134,8 @@ export const useWalletStore = defineStore('wallet', () => {
         validatedChallenges: validatedCount,
         starAllocation: 0, // Keep for compatibility, but we're using NIGHT now
         nightAllocation: estimatedNight,
-        donationSent: false
+        donationSent: false,
+        isConsolidator: false  // Initialize as false
       })
     }
 
@@ -142,6 +146,9 @@ export const useWalletStore = defineStore('wallet', () => {
     
     // Load saved donation address
     loadDonationAddress()
+    
+    // Load consolidator addresses
+    loadConsolidatorAddresses()
     
     // Load work_to_star_rate if available
     loadWorkToStarRate()
@@ -163,6 +170,39 @@ export const useWalletStore = defineStore('wallet', () => {
     if (saved) {
       donationAddress.value = saved
     }
+  }
+
+  function loadConsolidatorAddresses() {
+    const saved = localStorage.getItem(CONSOLIDATOR_ADDRESSES_KEY)
+    if (saved) {
+      try {
+        consolidatorAddresses.value = JSON.parse(saved)
+        // Apply to registered addresses
+        for (const addr of registeredAddresses.value) {
+          addr.isConsolidator = consolidatorAddresses.value.includes(addr.address)
+        }
+      } catch (e) {
+        console.error('Failed to load consolidator addresses:', e)
+      }
+    }
+  }
+
+  function toggleConsolidatorAddress(address: string) {
+    const addr = registeredAddresses.value.find(a => a.address === address)
+    if (!addr) return
+
+    addr.isConsolidator = !addr.isConsolidator
+
+    if (addr.isConsolidator) {
+      if (!consolidatorAddresses.value.includes(address)) {
+        consolidatorAddresses.value.push(address)
+      }
+    } else {
+      consolidatorAddresses.value = consolidatorAddresses.value.filter(a => a !== address)
+    }
+
+    // Save to localStorage
+    localStorage.setItem(CONSOLIDATOR_ADDRESSES_KEY, JSON.stringify(consolidatorAddresses.value))
   }
 
   function setWorkToStarRate(rates: number[]) {
@@ -202,7 +242,9 @@ export const useWalletStore = defineStore('wallet', () => {
       addr.donationSent = true
       addr.donationResponse = response
       addr.error = undefined
+      console.log(`Marking ${address} as consolidated, saving to localStorage...`)
       saveProgress()
+      console.log('Progress saved to localStorage')
     }
   }
 
@@ -228,13 +270,16 @@ export const useWalletStore = defineStore('wallet', () => {
   function loadProgress() {
     try {
       const stored = localStorage.getItem(STORAGE_KEY)
+      console.log('Loading progress from localStorage:', stored)
       if (!stored) return
       
       const progress = JSON.parse(stored)
+      console.log('Parsed progress:', progress)
       
       for (const saved of progress) {
         const addr = registeredAddresses.value.find(a => a.address === saved.address)
         if (addr) {
+          console.log(`Restoring consolidated state for ${saved.address}`)
           addr.donationSent = saved.donationSent
           addr.donationResponse = saved.donationResponse
         }
@@ -253,6 +298,75 @@ export const useWalletStore = defineStore('wallet', () => {
     })
   }
 
+  function exportProgress(): string {
+    const progress = {
+      consolidatedAddresses: registeredAddresses.value
+        .filter(a => a.donationSent)
+        .map(a => ({
+          address: a.address,
+          donationSent: a.donationSent,
+          donationResponse: a.donationResponse
+        })),
+      consolidatorAddresses: consolidatorAddresses.value,
+      donationAddress: donationAddress.value,
+      exportedAt: new Date().toISOString()
+    }
+    return JSON.stringify(progress, null, 2)
+  }
+
+  function importProgress(jsonData: string): { success: boolean, message: string } {
+    try {
+      const imported = JSON.parse(jsonData)
+      
+      if (!imported.consolidatedAddresses) {
+        return { success: false, message: 'Invalid format: missing consolidatedAddresses' }
+      }
+      
+      // Save consolidated addresses to localStorage
+      const progressData = imported.consolidatedAddresses
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(progressData))
+      
+      // Import donation address if available
+      if (imported.donationAddress) {
+        donationAddress.value = imported.donationAddress
+        localStorage.setItem(DONATION_ADDRESS_KEY, imported.donationAddress)
+      }
+      
+      // Import consolidator addresses if available
+      if (imported.consolidatorAddresses) {
+        consolidatorAddresses.value = imported.consolidatorAddresses
+        localStorage.setItem(CONSOLIDATOR_ADDRESSES_KEY, JSON.stringify(imported.consolidatorAddresses))
+      }
+      
+      // Apply to current addresses
+      let appliedCount = 0
+      for (const saved of progressData) {
+        const addr = registeredAddresses.value.find(a => a.address === saved.address)
+        if (addr) {
+          addr.donationSent = saved.donationSent
+          addr.donationResponse = saved.donationResponse
+          appliedCount++
+        }
+      }
+      
+      // Apply consolidator flags
+      for (const addr of registeredAddresses.value) {
+        addr.isConsolidator = consolidatorAddresses.value.includes(addr.address)
+      }
+      
+      return { 
+        success: true, 
+        message: `Imported ${appliedCount} consolidated addresses and ${consolidatorAddresses.value.length} consolidator addresses` 
+      }
+    } catch (e) {
+      console.error('Failed to import progress:', e)
+      return { 
+        success: false, 
+        message: `Import failed: ${e instanceof Error ? e.message : 'Unknown error'}` 
+      }
+    }
+  }
+
   function setError(message: string) {
     error.value = message
   }
@@ -267,6 +381,7 @@ export const useWalletStore = defineStore('wallet', () => {
     connectedAddresses,
     registeredAddresses,
     donationAddress,
+    consolidatorAddresses,
     workToStarRate,
     isLoading,
     isFetchingStatistics,
@@ -285,6 +400,7 @@ export const useWalletStore = defineStore('wallet', () => {
     disconnectWallet,
     loadRegisteredAddresses,
     setDonationAddress,
+    toggleConsolidatorAddress,
     setWorkToStarRate,
     updateAddressStatistics,
     markDonationSent,
@@ -292,6 +408,8 @@ export const useWalletStore = defineStore('wallet', () => {
     saveProgress,
     loadProgress,
     clearProgress,
+    exportProgress,
+    importProgress,
     setError,
     clearError
   }

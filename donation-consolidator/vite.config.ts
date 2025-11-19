@@ -21,5 +21,14 @@ export default defineConfig({
   },
   optimizeDeps: {
     exclude: ['@lucid-evolution/lucid']
+  },
+  server: {
+    proxy: {
+      '/api': {
+        target: 'https://scavenger.prod.gd.midnighttge.io',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, '')
+      }
+    }
   }
 })
