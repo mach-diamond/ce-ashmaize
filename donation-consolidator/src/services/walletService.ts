@@ -14,24 +14,25 @@ export const SUPPORTED_WALLETS = [
 
 export type WalletName = typeof SUPPORTED_WALLETS[number]
 
+// Store the wallet API for signing
+let currentWalletApi: any = null
+
+export function getCurrentWalletApi() {
+  return currentWalletApi
+}
+
 // Decode hex address to bech32 format
 function hexToAddress(hexAddress: string): string {
   try {
-    // Remove '0x' prefix if present
     const cleanHex = hexAddress.startsWith('0x') ? hexAddress.slice(2) : hexAddress
-    
-    // Convert hex string to Uint8Array
     const bytes = new Uint8Array(cleanHex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)))
     
-    // The first byte contains the address type and network info
     const header = bytes[0]
     const isTestnet = (header & 0x0F) === 0
     const prefix = isTestnet ? 'addr_test' : 'addr'
     
-    // Bech32 character set
     const charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
     
-    // Convert bytes to 5-bit groups for bech32
     const data: number[] = []
     let acc = 0
     let bits = 0
@@ -49,11 +50,9 @@ function hexToAddress(hexAddress: string): string {
       data.push((acc << (5 - bits)) & 31)
     }
     
-    // Create checksum
     const checksum = createChecksum(prefix, data)
     const combined = data.concat(checksum)
     
-    // Encode to bech32
     return prefix + '1' + combined.map(d => charset[d]).join('')
   } catch (error) {
     console.error('Error decoding address:', error)
@@ -61,7 +60,6 @@ function hexToAddress(hexAddress: string): string {
   }
 }
 
-// Create bech32 checksum
 function createChecksum(hrp: string, data: number[]): number[] {
   const values = hrpExpand(hrp).concat(data).concat([0, 0, 0, 0, 0, 0])
   const polymod = bech32Polymod(values) ^ 1
@@ -140,6 +138,9 @@ export async function connectWallet(walletName: string): Promise<string[]> {
     // Enable the wallet (this will prompt user for permission)
     const api = await cardano[walletName].enable()
     console.log(`${walletName} enabled, API:`, api)
+    
+    // Store the API for later use in signing
+    currentWalletApi = api
     
     const addresses: string[] = []
     const addressSet = new Set<string>()

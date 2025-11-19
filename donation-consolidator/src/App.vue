@@ -2,7 +2,13 @@
 import { onMounted, computed } from 'vue'
 import { useWalletStore } from './stores/walletStore'
 import { useChallenges } from './composables/useChallenges'
-import { detectAvailableWallets, connectWallet, getWalletDisplayName } from './services/walletService'
+import { 
+  detectAvailableWallets, 
+  connectWallet, 
+  getWalletDisplayName,
+  getCurrentWalletApi
+} from './services/walletService'
+import { submitDonation } from './services/donationService'
 
 const walletStore = useWalletStore()
 const { loadChallenges } = useChallenges()
@@ -49,13 +55,63 @@ function shortenAddress(address: string, chars = 12): string {
 function copyAddress(address: string) {
   navigator.clipboard.writeText(address)
 }
+
+// Handle donation submission
+async function handleDonate(originalAddress: string) {
+  if (!walletStore.donationAddress) {
+    walletStore.setError('Please enter a donation address first')
+    return
+  }
+  
+  if (originalAddress === walletStore.donationAddress) {
+    walletStore.setError('Cannot donate to the same address')
+    return
+  }
+  
+  const walletApi = getCurrentWalletApi()
+  if (!walletApi) {
+    walletStore.setError('No wallet connected')
+    return
+  }
+  
+  try {
+    walletStore.clearError()
+    walletStore.isLoading = true
+    
+    console.log(`Submitting donation from ${originalAddress} to ${walletStore.donationAddress}`)
+    
+    const result = await submitDonation(
+      walletStore.donationAddress,
+      originalAddress,
+      walletApi
+    )
+    
+    console.log('Donation successful:', result)
+    
+    // Mark as completed
+    walletStore.markDonationSent(originalAddress, result.donation_id, result.timestamp)
+    
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to submit donation'
+    walletStore.setError(message)
+    walletStore.markDonationError(originalAddress, message)
+    console.error('Donation error:', err)
+  } finally {
+    walletStore.isLoading = false
+  }
+}
+
+// Format NIGHT with commas
+function formatNight(value: number): string {
+  return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
 </script>
 
 <template>
   <div class="app">
     <header>
       <h1>🌙 Midnight Donation Consolidator</h1>
-      <p>Connect wallet and process donation requests for registered addresses</p>
+      <p>Connect wallet and consolidate mining rewards to a single address</p>
     </header>
 
     <!-- Error Display -->
@@ -80,8 +136,8 @@ function copyAddress(address: string) {
           <div class="stat-label">Completed</div>
         </div>
         <div class="stat-item">
-          <div class="stat-value">{{ walletStore.matchedAddresses.length }}</div>
-          <div class="stat-label">In Connected Wallet</div>
+          <div class="stat-value">{{ formatNight(walletStore.totalNightAllocation) }}</div>
+          <div class="stat-label">Total $NIGHT (est.)</div>
         </div>
       </section>
 
@@ -90,7 +146,7 @@ function copyAddress(address: string) {
         <h2>Wallet Connection</h2>
         
         <div v-if="walletStore.isLoading" class="loading">
-          Loading...
+          Processing...
         </div>
         
         <div v-else-if="!walletStore.isConnected">
@@ -112,6 +168,7 @@ function copyAddress(address: string) {
               <button 
                 @click="handleConnect(wallet)"
                 class="btn btn-primary"
+                :disabled="walletStore.isLoading"
               >
                 Connect
               </button>
@@ -157,16 +214,23 @@ function copyAddress(address: string) {
       <section class="card">
         <h2>Consolidation Destination</h2>
         <div class="donation-input">
-          <label for="donation-address">Address to send all donations:</label>
+          <label for="donation-address">Address to consolidate all rewards:</label>
           <input 
             id="donation-address"
-            v-model="walletStore.donationAddress"
+            :value="walletStore.donationAddress"
+            @input="walletStore.setDonationAddress(($event.target as HTMLInputElement).value)"
             type="text"
             placeholder="addr1..."
             class="input-address"
           />
-          <div v-if="walletStore.donationAddress" class="address-preview">
-            {{ shortenAddress(walletStore.donationAddress, 20) }}
+          <div v-if="walletStore.donationAddress" class="address-info">
+            <div class="address-preview">
+              {{ shortenAddress(walletStore.donationAddress, 20) }}
+            </div>
+            <div class="destination-allocation">
+              <strong>Total allocation for this address:</strong>
+              <span class="night-value">{{ formatNight(walletStore.destinationAddressAllocation) }} $NIGHT (est.)</span>
+            </div>
           </div>
         </div>
       </section>
@@ -189,7 +253,8 @@ function copyAddress(address: string) {
             <thead>
               <tr>
                 <th>Address</th>
-                <th>Validated</th>
+                <th>Challenges</th>
+                <th>$NIGHT (est.)</th>
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
@@ -218,8 +283,14 @@ function copyAddress(address: string) {
                   <span class="challenge-count">{{ addr.validatedChallenges }}</span>
                 </td>
                 <td class="center">
+                  <span class="night-amount">{{ formatNight(addr.nightAllocation) }}</span>
+                </td>
+                <td class="center">
                   <span v-if="addr.donationSent" class="status-badge status-done">
                     ✓ Done
+                  </span>
+                  <span v-else-if="addr.error" class="status-badge status-error">
+                    ✗ Error
                   </span>
                   <span v-else class="status-badge status-pending">
                     Pending
@@ -227,15 +298,25 @@ function copyAddress(address: string) {
                 </td>
                 <td class="center">
                   <button 
-                    v-if="!addr.donationSent"
-                    @click="walletStore.markDonationSent(addr.address)"
+                    v-if="!addr.donationSent && addr.validatedChallenges > 0"
+                    @click="handleDonate(addr.address)"
                     class="btn btn-success btn-sm"
+                    :disabled="!walletStore.donationAddress || !walletStore.isConnected || walletStore.isLoading"
                   >
-                    Mark Done
+                    <span v-if="walletStore.isLoading">...</span>
+                    <span v-else>Send Donation</span>
                   </button>
-                  <span v-else class="completed-time">
-                    {{ addr.lastUpdated ? new Date(addr.lastUpdated).toLocaleString() : '' }}
-                  </span>
+                  <div v-else-if="addr.donationSent" class="completed-info">
+                    <div class="completed-time">
+                      {{ addr.timestamp ? new Date(addr.timestamp).toLocaleString() : '' }}
+                    </div>
+                    <div class="donation-id" v-if="addr.donationId">
+                      ID: {{ addr.donationId.slice(0, 8) }}...
+                    </div>
+                  </div>
+                  <div v-else-if="addr.error" class="error-message">
+                    {{ addr.error }}
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -310,7 +391,7 @@ header p {
 }
 
 .stat-value {
-  font-size: 2.5rem;
+  font-size: 2rem;
   font-weight: bold;
   color: #667eea;
   line-height: 1;
@@ -479,10 +560,32 @@ header p {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.address-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
 .address-preview {
   color: #a0a0a0;
   font-size: 0.85rem;
   font-family: 'Courier New', monospace;
+}
+
+.destination-allocation {
+  padding: 0.75rem;
+  background: rgba(102, 126, 234, 0.1);
+  border: 1px solid rgba(102, 126, 234, 0.3);
+  border-radius: 6px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.night-value {
+  font-size: 1.25rem;
+  font-weight: bold;
+  color: #667eea;
 }
 
 .table-header {
@@ -554,6 +657,12 @@ header p {
   font-weight: 500;
 }
 
+.night-amount {
+  font-family: 'Courier New', monospace;
+  font-size: 0.9rem;
+  color: #667eea;
+}
+
 .status-badge {
   padding: 0.25rem 0.75rem;
   border-radius: 12px;
@@ -571,9 +680,32 @@ header p {
   color: #fbbf24;
 }
 
+.status-error {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+
+.completed-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
 .completed-time {
   font-size: 0.75rem;
   color: #a0a0a0;
+}
+
+.donation-id {
+  font-size: 0.7rem;
+  color: #667eea;
+  font-family: 'Courier New', monospace;
+}
+
+.error-message {
+  font-size: 0.75rem;
+  color: #ef4444;
+  max-width: 200px;
 }
 
 .btn {
@@ -591,12 +723,17 @@ header p {
   font-size: 0.85rem;
 }
 
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .btn-primary {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
 }
@@ -607,7 +744,7 @@ header p {
   border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
-.btn-secondary:hover {
+.btn-secondary:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.15);
 }
 
@@ -617,7 +754,7 @@ header p {
   border: 1px solid rgba(34, 197, 94, 0.3);
 }
 
-.btn-success:hover {
+.btn-success:hover:not(:disabled) {
   background: rgba(34, 197, 94, 0.3);
 }
 
