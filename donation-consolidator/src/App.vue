@@ -102,14 +102,17 @@ async function handleDonate(originalAddress: string) {
     
     console.log('Donation result:', result)
     
-    // Store the curl command for this address
+    // Store the curl command for this address (in case user needs it)
     curlCommands.value[originalAddress] = result.curlCommand
     
     if (result.success && result.response) {
-      // Mark as completed
+      // API submission successful!
       walletStore.markDonationSent(originalAddress, result.response)
+      alert(`✓ Donation successful!\n\nConsolidated ${result.response.solutions_consolidated} solutions from\n${originalAddress.slice(0, 20)}...\n\nto\n${walletStore.donationAddress.slice(0, 20)}...`)
+      // Clear the curl command since we don't need it
+      delete curlCommands.value[originalAddress]
     } else {
-      // Show error with curl command in UI
+      // API failed, show curl command
       walletStore.setError(result.error || 'Donation failed - see curl command below')
     }
     
@@ -457,7 +460,7 @@ function formatNight(value: number): string {
                         :disabled="!walletStore.donationAddress || !walletStore.isConnected || walletStore.isLoading"
                       >
                         <span v-if="walletStore.isLoading">...</span>
-                        <span v-else>Generate Curl</span>
+                        <span v-else>Donate</span>
                       </button>
                       
                       <button 
