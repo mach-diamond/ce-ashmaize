@@ -64,69 +64,56 @@ export async function submitDonation(
   // Construct the API URL
   const url = `${API_BASE}/donate_to/${destinationAddress}/${originalAddress}/${signatureHex}`
   
-  console.log('Submitting to:', url)
+  console.log('Attempting API submission to:', url)
   
-  // Print curl command for debugging
+  // Generate curl command for fallback
   const fullUrl = `https://scavenger.prod.gd.midnighttge.io/donate_to/${destinationAddress}/${originalAddress}/${signatureHex}`
   const curlCommand = `curl -L -X POST "${fullUrl}" -d "{}"`
   
-  console.log('\n=== COPY THIS CURL COMMAND AND RUN IT IN YOUR TERMINAL ===')
-  console.log(curlCommand)
-  console.log('\n=== Or run this in browser console to copy to clipboard: ===')
-  console.log(`copy(\`${curlCommand}\`)`)
-  console.log('====================================\n')
-  
-  // Try to copy to clipboard automatically
+  // Try API submission first
   try {
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText(curlCommand)
-      console.log('✓ Curl command copied to clipboard!')
-    }
-  } catch (e) {
-    console.log('Could not auto-copy to clipboard')
-  }
-  
-  // Submit to API
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: '{}'
-  }).catch(err => {
-    // CORS error - return curl command
-    if (err.message.includes('Failed to fetch') || err.message.includes('CORS')) {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: '{}'
+    })
+    
+    if (response.ok) {
+      const data = await response.json()
+      console.log('✓ API submission successful:', data)
       return {
-        success: false,
+        success: true,
         curlCommand,
-        error: 'CORS blocked - use the curl command below'
+        response: data as DonationResponse
       }
-    }
-    throw err
-  })
-  
-  if (!response || !response.ok) {
-    let errorMessage = response ? `API request failed: ${response.status}` : 'No response'
-    try {
-      if (response) {
+    } else {
+      // API returned an error
+      let errorMessage = `API request failed: ${response.status}`
+      try {
         const errorData = await response.json()
         errorMessage = errorData.message || errorMessage
         console.error('API Error:', errorData)
+      } catch (e) {
+        // Ignore JSON parse errors
       }
-    } catch (e) {
-      // Ignore
+      
+      console.log('⚠ API failed, falling back to curl command')
+      return {
+        success: false,
+        curlCommand,
+        error: `${errorMessage} - Use curl command below`
+      }
     }
+  } catch (err: any) {
+    // Network/CORS error - fall back to curl command
+    console.log('⚠ Network error, falling back to curl command:', err.message)
+    
     return {
       success: false,
       curlCommand,
-      error: errorMessage
+      error: 'API unavailable - Use curl command below'
     }
-  }
-  
-  const data = await response.json()
-  return {
-    success: true,
-    curlCommand,
-    response: data as DonationResponse
   }
 }

@@ -8,14 +8,37 @@ export interface StatisticsResponse {
   // May have other fields
 }
 
-// Historical daily $NIGHT values for estimation
+// Official final $NIGHT values per solution for each campaign day
+// These values are in the smallest unit (1 $NIGHT = 1,000,000 units)
 const DAILY_NIGHT_VALUES = [
-  5.95, 3.41, 3.83, 5.62, 3.57, 2.96, 2.83, 2.37, 
-  2.25, 2.32, 2.74, 2.59, 2.29, 2.88, 3.5, 3.12, 2.73, 2.27
+  6008676,   // Day 1
+  3406761,   // Day 2
+  3826220,   // Day 3
+  5622964,   // Day 4
+  3565984,   // Day 5
+  2955878,   // Day 6
+  2833044,   // Day 7
+  2369902,   // Day 8
+  2254948,   // Day 9
+  2319671,   // Day 10
+  2740022,   // Day 11
+  2592181,   // Day 12
+  2289733,   // Day 13
+  2881997,   // Day 14
+  3498531,   // Day 15
+  3119269,   // Day 16
+  2726926,   // Day 17
+  2269176,   // Day 18
+  2197111,   // Day 19
+  3657916,   // Day 20
+  15695416   // Day 21
 ]
 
+// Convert to actual $NIGHT (divide by 1,000,000)
+const DAILY_NIGHT_VALUES_CONVERTED = DAILY_NIGHT_VALUES.map(v => v / 1000000)
+
 // Calculate average for days we don't have data for
-const AVERAGE_NIGHT_VALUE = DAILY_NIGHT_VALUES.reduce((a, b) => a + b, 0) / DAILY_NIGHT_VALUES.length
+const AVERAGE_NIGHT_VALUE = DAILY_NIGHT_VALUES_CONVERTED.reduce((a, b) => a + b, 0) / DAILY_NIGHT_VALUES_CONVERTED.length
 
 // Estimate NIGHT allocation based on challenge data
 export function estimateNightAllocation(challengeQueue: any[]): number {
@@ -37,8 +60,8 @@ export function estimateNightAllocation(challengeQueue: any[]): number {
   let totalNight = 0
   for (const [day, count] of Object.entries(dailyCounts)) {
     const dayIndex = parseInt(day) - 1 // Day 1 = index 0
-    const nightPerSolution = dayIndex < DAILY_NIGHT_VALUES.length 
-      ? DAILY_NIGHT_VALUES[dayIndex] 
+    const nightPerSolution = dayIndex < DAILY_NIGHT_VALUES_CONVERTED.length 
+      ? DAILY_NIGHT_VALUES_CONVERTED[dayIndex] 
       : AVERAGE_NIGHT_VALUE
     
     totalNight += count * nightPerSolution
